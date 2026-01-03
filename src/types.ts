@@ -1,0 +1,15 @@
+export interface OpenCodeSettings {
+  port: number;
+  hostname: string;
+  autoStart: boolean;
+  opencodePath: string;
+}
+
+export const DEFAULT_SETTINGS: OpenCodeSettings = {
+  port: 14096,
+  hostname: "127.0.0.1",
+  autoStart: false,
+  opencodePath: "opencode",
+};
+
+export const OPENCODE_VIEW_TYPE = "opencode-view";
