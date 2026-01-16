@@ -83,7 +83,7 @@ export class OpenCodeSettingTab extends PluginSettingTab {
           })
       );
 
-    containerEl.createEl("h3", { text: "Behavior" });
+     containerEl.createEl("h3", { text: "Behavior" });
 
     new Setting(containerEl)
       .setName("Auto-start server")
@@ -95,6 +95,20 @@ export class OpenCodeSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.autoStart)
           .onChange(async (value) => {
             this.plugin.settings.autoStart = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Disable Claude settings")
+      .setDesc(
+        "Enable development mode for testing with Claude/localhost services (allows localhost origins in bridge)"
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.devMode ?? false)
+          .onChange(async (value) => {
+            this.plugin.settings.devMode = value;
             await this.plugin.saveSettings();
           })
       );

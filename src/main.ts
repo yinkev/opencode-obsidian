@@ -1,98 +1,178 @@
-import { Plugin, WorkspaceLeaf, Notice } from "obsidian";
+import { App, Plugin, PluginSettingTab, Setting, Notice, TFile } from "obsidian";
 import { OpenCodeSettings, DEFAULT_SETTINGS, OPENCODE_VIEW_TYPE } from "./types";
-import { OpenCodeView } from "./OpenCodeView";
+import { OpenWorkView } from "./view";
 import { OpenCodeSettingTab } from "./SettingsTab";
-import { ProcessManager, ProcessState } from "./ProcessManager";
+import { ServerManager, OpenCodeClient, ServerState } from "./opencode";
 import { registerOpenCodeIcons, OPENCODE_ICON_NAME } from "./icons";
+import { ContextTracker, ContextInjector } from "./context";
 
 export default class OpenCodePlugin extends Plugin {
   settings: OpenCodeSettings = DEFAULT_SETTINGS;
-  private processManager: ProcessManager; 
-  private stateChangeCallbacks: Array<(state: ProcessState) => void> = [];
+  private serverManager: ServerManager;
+  private contextTracker: ContextTracker;
+  private contextInjector: ContextInjector;
+  private openCodeClient: OpenCodeClient;
+  private stateChangeCallbacks: Array<(state: ServerState) => void> = [];
 
   async onload(): Promise<void> {
-    console.log("Loading OpenCode plugin");
-
-    registerOpenCodeIcons();
-
     await this.loadSettings();
 
     const projectDirectory = this.getProjectDirectory();
 
-    this.processManager = new ProcessManager(
-      this.settings,
-      projectDirectory,
-      (state) => this.notifyStateChange(state)
+    // Initialize server manager
+    this.serverManager = new ServerManager(
+      {
+        port: this.settings.port,
+        hostname: this.settings.hostname,
+        opencodePath: this.settings.opencodePath,
+        projectDirectory,
+        startupTimeout: this.settings.startupTimeout,
+        corsOrigins: ["app://obsidian.md"],
+      },
+      (state: ServerState) => this.notifyStateChange(state)
     );
+
+    // Initialize OpenCode client
+    this.openCodeClient = new OpenCodeClient({
+      baseUrl: this.serverManager.getUrl() || "",
+    });
+
+    // Initialize context tracking and injection
+    this.contextTracker = new ContextTracker(this.app);
+    this.contextInjector = new ContextInjector(this.openCodeClient);
 
     console.log("[OpenCode] Configured with project directory:", projectDirectory);
 
-    this.registerView(OPENCODE_VIEW_TYPE, (leaf) => new OpenCodeView(leaf, this));
-    this.addSettingTab(new OpenCodeSettingTab(this.app, this));
+    this.registerView(OPENCODE_VIEW_TYPE, (leaf) => new OpenWorkView(leaf, this));
 
     this.addRibbonIcon(OPENCODE_ICON_NAME, "OpenCode", () => {
       this.activateView();
     });
 
     this.addCommand({
-      id: "toggle-opencode-view",
+      id: "toggle-view",
       name: "Toggle OpenCode panel",
-      callback: () => {
-        this.toggleView();
-      },
-      hotkeys: [
-        {
-          modifiers: ["Mod", "Shift"],
-          key: "o",
-        },
-      ],
+      callback: () => this.activateView(),
     });
 
     this.addCommand({
-      id: "start-opencode-server",
+      id: "start-server",
       name: "Start OpenCode server",
-      callback: () => {
-        this.startServer();
-      },
+      callback: () => this.startServer(),
     });
 
     this.addCommand({
-      id: "stop-opencode-server",
+      id: "stop-server",
       name: "Stop OpenCode server",
-      callback: () => {
-        this.stopServer();
-      },
+      callback: () => this.stopServer(),
     });
 
-    if (this.settings.autoStart) {
-      this.app.workspace.onLayoutReady(async () => {
-        await this.startServer();
-      });
-    }
+    this.addSettingTab(new OpenCodeSettingTab(this.app, this));
+    registerOpenCodeIcons();
 
-    console.log("OpenCode plugin loaded");
+    console.log("[OpenCode] Plugin loaded");
   }
 
   async onunload(): Promise<void> {
+    // Properly clean up all resources when plugin unloads
+    this.contextTracker.stop();
     this.stopServer();
     this.app.workspace.detachLeavesOfType(OPENCODE_VIEW_TYPE);
   }
 
-  async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+  onProcessStateChange(callback: (state: "stopped" | "starting" | "running" | "error") => void): () => void {
+    this.stateChangeCallbacks.push(callback as (state: ServerState) => void);
+    return () => {
+      const index = this.stateChangeCallbacks.indexOf(callback as (state: ServerState) => void);
+      if (index > -1) {
+        this.stateChangeCallbacks.splice(index, 1);
+      }
+    };
+  }
+
+  private notifyStateChange(state: ServerState): void {
+    this.stateChangeCallbacks.forEach(callback => callback(state));
+  }
+
+  async activateView(): Promise<void> {
+    const { workspace } = this.app;
+
+    let leaf = workspace.getLeavesOfType(OPENCODE_VIEW_TYPE)[0];
+    if (!leaf) {
+      leaf = workspace.getLeaf(true);
+      await leaf.setViewState({
+        type: OPENCODE_VIEW_TYPE,
+        active: true,
+      });
+    }
+    workspace.revealLeaf(leaf);
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
-    this.processManager.updateSettings(this.settings);
+    this.serverManager.updateConfig({
+      port: this.settings.port,
+      hostname: this.settings.hostname,
+      opencodePath: this.settings.opencodePath,
+      startupTimeout: this.settings.startupTimeout,
+    });
   }
 
-  // Update project directory and restart server if running
+  async startServer(): Promise<boolean> {
+    const success = await this.serverManager.start();
+    if (success) {
+      // Update client with new URL and start context tracking
+      this.openCodeClient.updateConfig({
+        baseUrl: this.serverManager.getUrl() || "",
+      });
+      this.contextTracker.start();
+    }
+    return success;
+  }
+
+  stopServer(): void {
+    this.contextTracker.stop();
+    this.serverManager.stop();
+  }
+
+  getProcessState(): "stopped" | "starting" | "running" | "error" {
+    const state = this.serverManager.getState();
+    switch (state) {
+      case "stopped": return "stopped";
+      case "starting": return "starting";
+      case "running": return "running";
+      case "error": return "error";
+      default: return "stopped";
+    }
+  }
+
+  getLastError(): string | null {
+    return this.serverManager.getLastError();
+  }
+
+  getServerUrl(): string {
+    return this.serverManager.getUrl() || "";
+  }
+
+  getContextTracker(): ContextTracker {
+    return this.contextTracker;
+  }
+
+  getContextInjector(): ContextInjector {
+    return this.contextInjector;
+  }
+
+  getOpenCodeClient(): OpenCodeClient {
+    return this.openCodeClient;
+  }
+
   async updateProjectDirectory(directory: string): Promise<void> {
     this.settings.projectDirectory = directory;
     await this.saveData(this.settings);
 
-    this.processManager.updateProjectDirectory(this.getProjectDirectory());
+    this.serverManager.updateConfig({
+      projectDirectory: this.getProjectDirectory(),
+    });
 
     if (this.getProcessState() === "running") {
       this.stopServer();
@@ -100,112 +180,11 @@ export default class OpenCodePlugin extends Plugin {
     }
   }
 
-  private getExistingLeaf(): WorkspaceLeaf | null {
-    const leaves = this.app.workspace.getLeavesOfType(OPENCODE_VIEW_TYPE);
-    return leaves.length > 0 ? leaves[0] : null;
+  async loadSettings(): Promise<void> {
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
   }
 
-  async activateView(): Promise<void> {
-    const existingLeaf = this.getExistingLeaf();
-
-    if (existingLeaf) {
-      this.app.workspace.revealLeaf(existingLeaf);
-      return;
-    }
-
-    // Create new leaf based on defaultViewLocation setting
-    let leaf: WorkspaceLeaf | null = null;
-    if (this.settings.defaultViewLocation === "main") {
-      leaf = this.app.workspace.getLeaf("tab");
-    } else {
-      leaf = this.app.workspace.getRightLeaf(false);
-    }
-
-    if (leaf) {
-      await leaf.setViewState({
-        type: OPENCODE_VIEW_TYPE,
-        active: true,
-      });
-      this.app.workspace.revealLeaf(leaf);
-    }
-  }
-
-  async toggleView(): Promise<void> {
-    const existingLeaf = this.getExistingLeaf();
-
-    if (existingLeaf) {
-      // Check if the view is in the sidebar or main area
-      const isInSidebar = existingLeaf.getRoot() === this.app.workspace.rightSplit;
-
-      if (isInSidebar) {
-        // For sidebar views, check if sidebar is collapsed
-        const rightSplit = this.app.workspace.rightSplit;
-        if (rightSplit && !rightSplit.collapsed) {
-          existingLeaf.detach();
-        } else {
-          this.app.workspace.revealLeaf(existingLeaf);
-        }
-      } else {
-        // For main area views, just detach (close the tab)
-        existingLeaf.detach();
-      }
-    } else {
-      await this.activateView();
-    }
-  }
-
-  async startServer(): Promise<boolean> {
-    const success = await this.processManager.start();
-    if (success) {
-      new Notice("OpenCode server started");
-    }
-    return success;
-  }
-
-  stopServer(): void {
-    this.processManager.stop();
-    new Notice("OpenCode server stopped");
-  }
-
-  getProcessState(): ProcessState {
-    return this.processManager?.getState() ?? "stopped";
-  }
-
-  getLastError(): string | null {
-    return this.processManager.getLastError() ?? null;
-  }
-
-  getServerUrl(): string {
-    return this.processManager.getUrl();
-  }
-
-  onProcessStateChange(callback: (state: ProcessState) => void): () => void {
-    this.stateChangeCallbacks.push(callback);
-    return () => {
-      const index = this.stateChangeCallbacks.indexOf(callback);
-      if (index > -1) {
-        this.stateChangeCallbacks.splice(index, 1);
-      }
-    };
-  }
-
-  private notifyStateChange(state: ProcessState): void {
-    for (const callback of this.stateChangeCallbacks) {
-      callback(state);
-    }
-  }
-
-  getProjectDirectory(): string {
-    if (this.settings.projectDirectory) {
-      console.log("[OpenCode] Using project directory from settings:", this.settings.projectDirectory);
-      return this.settings.projectDirectory;
-    }
-    const adapter = this.app.vault.adapter as any;
-    const vaultPath = adapter.basePath || "";
-    if (!vaultPath) {
-      console.warn("[OpenCode] Warning: Could not determine vault path");
-    }
-    console.log("[OpenCode] Using vault path as project directory:", vaultPath);
-    return vaultPath;
+  private getProjectDirectory(): string {
+    return this.settings.projectDirectory || (this.app.vault.adapter as any).basePath;
   }
 }

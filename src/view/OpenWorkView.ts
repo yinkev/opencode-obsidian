@@ -8,7 +8,6 @@ import {
   BridgeInitPayload,
   UIToPluginMessageType,
 } from "../bridge";
-import { DEV_CORS_ORIGIN } from "../opencode";
 
 const ALLOWED_ORIGINS = ["app://obsidian.md"];
 
@@ -20,6 +19,8 @@ export class OpenWorkView extends ItemView {
   private bridgeHost: BridgeHost | null = null;
   private uiReady = false;
   private activeSessionId: string | null = null;
+  private contextUnsubscribe: (() => void) | null = null;
+  private iframeLoaded = false;
 
   constructor(leaf: WorkspaceLeaf, plugin: OpenCodePlugin) {
     super(leaf);
@@ -39,39 +40,53 @@ export class OpenWorkView extends ItemView {
   }
 
   async onOpen(): Promise<void> {
-    this.contentEl.empty();
-    this.contentEl.addClass("opencode-container");
+    // Only initialize if we don't already have an iframe (first time opening)
+    if (!this.iframeEl) {
+      this.contentEl.empty();
+      this.contentEl.addClass("opencode-container");
 
-    this.unsubscribeStateChange = this.plugin.onProcessStateChange((state) => {
-      this.currentState = state;
+      this.unsubscribeStateChange = this.plugin.onProcessStateChange((state) => {
+        this.currentState = state;
+        this.updateView();
+      });
+
+      this.currentState = this.plugin.getProcessState();
       this.updateView();
-    });
 
-    this.currentState = this.plugin.getProcessState();
-    this.updateView();
+      if (this.currentState === "stopped") {
+        this.plugin.startServer();
+      }
+    } else {
+      // Re-attach existing iframe if view is being moved
+      this.contentEl.empty();
+      this.contentEl.addClass("opencode-container");
+      this.contentEl.appendChild(this.iframeEl);
 
-    if (this.currentState === "stopped") {
-      this.plugin.startServer();
+      // Re-establish event listeners and state tracking
+      this.unsubscribeStateChange = this.plugin.onProcessStateChange((state) => {
+        this.currentState = state;
+        this.updateView();
+      });
+
+      this.startContextTracking();
     }
   }
 
   async onClose(): Promise<void> {
+    // Don't destroy iframe and bridge when view is just being moved between containers
+    // Only clean up when the plugin is actually unloading
     if (this.unsubscribeStateChange) {
       this.unsubscribeStateChange();
       this.unsubscribeStateChange = null;
     }
 
-    if (this.bridgeHost) {
-      this.bridgeHost.detach();
-      this.bridgeHost = null;
+    if (this.contextUnsubscribe) {
+      this.contextUnsubscribe();
+      this.contextUnsubscribe = null;
     }
 
-    if (this.iframeEl) {
-      this.iframeEl.src = "about:blank";
-      this.iframeEl = null;
-    }
-
-    this.uiReady = false;
+    // Preserve iframe and bridge for view movements
+    // They will be properly cleaned up in onunload()
   }
 
   getActiveSessionId(): string | null {
@@ -140,56 +155,66 @@ export class OpenWorkView extends ItemView {
   }
 
   private renderRunningState(): void {
-    this.contentEl.empty();
+    // Only create new iframe if we don't have one
+    if (!this.iframeEl) {
+      const headerEl = this.contentEl.createDiv({ cls: "opencode-header" });
 
-    const headerEl = this.contentEl.createDiv({ cls: "opencode-header" });
+      const titleSection = headerEl.createDiv({ cls: "opencode-header-title" });
+      const iconEl = titleSection.createSpan();
+      setIcon(iconEl, OPENCODE_ICON_NAME);
+      titleSection.createSpan({ text: "OpenCode" });
 
-    const titleSection = headerEl.createDiv({ cls: "opencode-header-title" });
-    const iconEl = titleSection.createSpan();
-    setIcon(iconEl, OPENCODE_ICON_NAME);
-    titleSection.createSpan({ text: "OpenCode" });
+      const actionsEl = headerEl.createDiv({ cls: "opencode-header-actions" });
 
-    const actionsEl = headerEl.createDiv({ cls: "opencode-header-actions" });
+      const reloadButton = actionsEl.createEl("button", {
+        attr: { "aria-label": "Reload" },
+      });
+      setIcon(reloadButton, "refresh-cw");
+      reloadButton.addEventListener("click", () => {
+        this.reloadIframe();
+      });
 
-    const reloadButton = actionsEl.createEl("button", {
-      attr: { "aria-label": "Reload" },
-    });
-    setIcon(reloadButton, "refresh-cw");
-    reloadButton.addEventListener("click", () => {
-      this.reloadIframe();
-    });
+      const stopButton = actionsEl.createEl("button", {
+        attr: { "aria-label": "Stop server" },
+      });
+      setIcon(stopButton, "square");
+      stopButton.addEventListener("click", () => {
+        this.plugin.stopServer();
+      });
 
-    const stopButton = actionsEl.createEl("button", {
-      attr: { "aria-label": "Stop server" },
-    });
-    setIcon(stopButton, "square");
-    stopButton.addEventListener("click", () => {
-      this.plugin.stopServer();
-    });
+      const iframeContainer = this.contentEl.createDiv({
+        cls: "opencode-iframe-container",
+      });
 
-    const iframeContainer = this.contentEl.createDiv({
-      cls: "opencode-iframe-container",
-    });
+      const serverUrl = this.plugin.getServerUrl();
+      console.log("[OpenWorkView] Creating new iframe with URL:", serverUrl);
 
-    const serverUrl = this.plugin.getServerUrl();
-    console.log("[OpenWorkView] Loading iframe with URL:", serverUrl);
+      this.iframeEl = iframeContainer.createEl("iframe", {
+        cls: "opencode-iframe",
+        attr: {
+          src: serverUrl,
+          frameborder: "0",
+          allow: "clipboard-read; clipboard-write",
+        },
+      });
 
-    this.iframeEl = iframeContainer.createEl("iframe", {
-      cls: "opencode-iframe",
-      attr: {
-        src: serverUrl,
-        frameborder: "0",
-        allow: "clipboard-read; clipboard-write",
-      },
-    });
+      this.iframeEl.addEventListener("load", () => {
+        if (!this.iframeLoaded) {
+          this.iframeLoaded = true;
+          this.initBridge();
+        }
+      });
 
-    this.iframeEl.addEventListener("load", () => {
-      this.initBridge();
-    });
-
-    this.iframeEl.addEventListener("error", () => {
-      console.error("[OpenWorkView] Failed to load iframe");
-    });
+      this.iframeEl.addEventListener("error", () => {
+        console.error("[OpenWorkView] Failed to load iframe");
+      });
+    } else {
+      // Iframe already exists, just ensure it's in the DOM
+      console.log("[OpenWorkView] Reusing existing iframe");
+      if (!this.contentEl.contains(this.iframeEl)) {
+        this.contentEl.appendChild(this.iframeEl);
+      }
+    }
   }
 
   private renderErrorState(): void {
@@ -243,7 +268,7 @@ export class OpenWorkView extends ItemView {
     if (!this.iframeEl) return;
 
     const devMode = this.plugin.settings.devMode ?? false;
-    const origins = devMode ? [...ALLOWED_ORIGINS, DEV_CORS_ORIGIN] : ALLOWED_ORIGINS;
+    const origins = devMode ? [...ALLOWED_ORIGINS, "http://localhost:5173"] : ALLOWED_ORIGINS;
 
     this.bridgeHost = new BridgeHost({
       allowedOrigins: origins,
@@ -280,15 +305,34 @@ export class OpenWorkView extends ItemView {
       case "ui/ready":
         this.uiReady = true;
         console.log("[OpenWorkView] UI ready, handshake complete");
+        // Inject current context when UI becomes ready
+        if (this.activeSessionId) {
+          console.log("[OpenWorkView] Injecting context when UI ready:", this.activeSessionId);
+          const snapshot = this.plugin.getContextTracker().getSnapshot();
+          console.log("[OpenWorkView] Context snapshot:", snapshot);
+          this.plugin.getContextInjector().inject(this.activeSessionId, snapshot);
+        }
         break;
 
       case "ui/session/selected":
         this.activeSessionId = (payload as { sessionId: string }).sessionId;
         console.log("[OpenWorkView] Active session:", this.activeSessionId);
+        // Inject context when session becomes active
+        if (this.activeSessionId) {
+          console.log("[OpenWorkView] Injecting context for new session:", this.activeSessionId);
+          const snapshot = this.plugin.getContextTracker().getSnapshot();
+          console.log("[OpenWorkView] Context snapshot:", snapshot);
+          this.plugin.getContextInjector().inject(this.activeSessionId, snapshot);
+        }
         break;
 
       case "ui/requestContextNow":
-        console.log("[OpenWorkView] Context requested for session:", (payload as any).sessionId);
+        const sessionId = (payload as any).sessionId;
+        console.log("[OpenWorkView] Context requested for session:", sessionId);
+        if (sessionId) {
+          const snapshot = this.plugin.getContextTracker().getSnapshot();
+          this.plugin.getContextInjector().inject(sessionId, snapshot);
+        }
         break;
 
       case "ui/vault/openFile":
@@ -344,11 +388,21 @@ export class OpenWorkView extends ItemView {
     }
   }
 
+  private startContextTracking(): void {
+    this.contextUnsubscribe = this.plugin.getContextTracker().onContextChange((snapshot) => {
+      // Inject context when it changes, but only if we have an active session
+      if (this.activeSessionId && this.uiReady) {
+        this.plugin.getContextInjector().inject(this.activeSessionId, snapshot);
+      }
+    });
+  }
+
   private reloadIframe(): void {
     if (this.iframeEl) {
       const src = this.iframeEl.src;
       this.iframeEl.src = "about:blank";
       this.uiReady = false;
+      this.iframeLoaded = false;
       setTimeout(() => {
         if (this.iframeEl) {
           this.iframeEl.src = src;

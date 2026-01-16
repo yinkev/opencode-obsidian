@@ -66,8 +66,10 @@ export class ContextInjector {
     const contextText = this.formatContext(snapshot);
 
     try {
+      console.log("[ContextInjector] Injecting context:", contextText);
       await this.client.promptNoReply(sessionId, contextText);
       this.lastInjectionTime = Date.now();
+      console.log("[ContextInjector] Context injection successful");
       return true;
     } catch (err) {
       console.error("[ContextInjector] Injection failed:", err);

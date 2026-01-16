@@ -1,6 +1,9 @@
 import { spawn, ChildProcess } from "child_process";
 import { ServerConfig, ServerState, DEFAULT_CORS_ORIGINS } from "./types";
 import { findFreePort } from "./PortFinder";
+import * as os from "os";
+import * as path from "path";
+import * as fs from "fs";
 
 export class ServerManager {
   private process: ChildProcess | null = null;
@@ -186,10 +189,21 @@ export class ServerManager {
   private buildEnv(): NodeJS.ProcessEnv {
     const env = { ...process.env };
 
+    // Isolate plugin from user's existing OpenCode config
+    const pluginConfigDir = path.join(os.homedir(), '.config', 'opencode-plugin');
+    env.OPENCODE_CONFIG_DIR = pluginConfigDir;
+
+    // Ensure plugin config directory exists
+    if (!fs.existsSync(pluginConfigDir)) {
+      fs.mkdirSync(pluginConfigDir, { recursive: true });
+    }
+
     // Optional basic auth via env vars
     if (this.config.basicAuth) {
       env.OPENCODE_BASIC_AUTH_USER = this.config.basicAuth.username;
       env.OPENCODE_BASIC_AUTH_PASS = this.config.basicAuth.password;
+      // Also set the server password that opencode expects
+      env.OPENCODE_SERVER_PASSWORD = this.config.basicAuth.password;
     }
 
     return env;
