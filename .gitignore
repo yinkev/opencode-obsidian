@@ -7,3 +7,6 @@ data.json
 # Local agent planning
 .sisyphus/
 
+# Vendored build output (rebuilt from source)
+assets/openwork/
+

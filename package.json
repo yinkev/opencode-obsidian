@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && bun run esbuild.config.mjs production",
-    "test": "bun test"
+    "build:openwork": "node scripts/build-openwork.mjs && node scripts/copy-openwork-dist.mjs",
+    "build:all": "bun run build:openwork && bun run build",
+    "test": "bun test tests/"
   },
   "keywords": [
     "obsidian",
