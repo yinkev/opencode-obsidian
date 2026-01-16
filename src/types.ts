@@ -8,6 +8,7 @@ export interface OpenCodeSettings {
   projectDirectory: string;
   startupTimeout: number;
   defaultViewLocation: ViewLocation;
+  devMode?: boolean;
 }
 
 export const DEFAULT_SETTINGS: OpenCodeSettings = {
