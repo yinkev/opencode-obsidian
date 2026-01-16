@@ -1,18 +1,8 @@
 import { App, PluginSettingTab, Setting, Notice } from "obsidian";
 import { existsSync, statSync } from "fs";
-import { homedir } from "os";
 import type OpenCodePlugin from "./main";
 import type { ViewLocation } from "./types";
-
-function expandTilde(path: string): string {
-  if (path === "~") {
-    return homedir();
-  }
-  if (path.startsWith("~/")) {
-    return path.replace("~", homedir());
-  }
-  return path;
-}
+import { expandTilde } from "./util/path";
 
 export class OpenCodeSettingTab extends PluginSettingTab {
   plugin: OpenCodePlugin;
